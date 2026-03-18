@@ -1,0 +1,50 @@
+{
+    "project": "SG-CL (Symbolic-Gated Continual Learning)",
+    "version": "0.1.0",
+    
+    "model": {
+        "base_model": "meta-llama/Llama-2-7b-hf",
+        "local_path": "./models/llama-2-7b-hf",
+        "model_type": "causal_lm"
+    },
+    
+    "lora": {
+        "r": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        "bias": "none"
+    },
+    
+    "training": {
+        "learning_rate": 2e-4,
+        "batch_size": 4,
+        "gradient_accumulation_steps": 4,
+        "num_epochs": 3,
+        "max_seq_length": 512,
+        "warmup_ratio": 0.03,
+        "weight_decay": 0.01,
+        "fp16": true
+    },
+    
+    "sgcl": {
+        "enable_gating": true,
+        "guard_rail_weight": 1.0,
+        "max_guard_rails_per_conflict": 5,
+        "conceptnet_api": "http://api.conceptnet.io",
+        "use_local_fallback": true
+    },
+    
+    "paths": {
+        "output_dir": "./outputs",
+        "data_dir": "./data",
+        "models_dir": "./models",
+        "logs_dir": "./logs"
+    },
+    
+    "logging": {
+        "logging_steps": 10,
+        "save_steps": 100,
+        "eval_steps": 100
+    }
+}
