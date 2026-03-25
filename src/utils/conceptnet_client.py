@@ -88,16 +88,18 @@ class ConceptNetClient:
     # Relations that support inheritance
     INHERITABLE_RELATIONS = {"CapableOf", "HasProperty", "AtLocation", "UsedFor"}
     
-    def __init__(self, cache_dir: Optional[str] = None, rate_limit_delay: float = 0.1):
+    def __init__(self, cache_dir: Optional[str] = None, rate_limit_delay: float = 0.1, local_only: bool = False):
         """
         Initialize ConceptNet client.
         
         Args:
             cache_dir: Directory for caching API responses
             rate_limit_delay: Delay between API calls to avoid rate limiting
+            local_only: If True, skip remote API calls and use local knowledge only
         """
         self.cache_dir = cache_dir
         self.rate_limit_delay = rate_limit_delay
+        self.local_only = local_only
         self._last_request_time = 0
         
         if cache_dir:
@@ -135,6 +137,10 @@ class ConceptNetClient:
     
     def _make_request(self, endpoint: str, params: dict = None) -> dict:
         """Make a request to ConceptNet API with caching and rate limiting."""
+        # Skip HTTP when in local-only mode
+        if self.local_only:
+            return self._fallback_to_local(params)
+        
         cache_key = f"{endpoint}_{json.dumps(params, sort_keys=True)}"
         
         # Try cache first
@@ -553,11 +559,11 @@ class ConceptNetClient:
 # Utility Functions
 # =============================================================================
 
-def create_client(cache_dir: str = None) -> ConceptNetClient:
+def create_client(cache_dir: str = None, local_only: bool = False) -> ConceptNetClient:
     """Create a ConceptNet client with default settings."""
     if cache_dir is None:
         cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "conceptnet_cache")
-    return ConceptNetClient(cache_dir=cache_dir)
+    return ConceptNetClient(cache_dir=cache_dir, local_only=local_only)
 
 
 # =============================================================================

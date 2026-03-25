@@ -18,6 +18,24 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
+
+def check_gpu():
+    """Verify CUDA GPU is available before proceeding."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("\033[91m✗ ERROR: No CUDA GPU detected!\033[0m")
+            print("  This project requires an NVIDIA GPU with CUDA support.")
+            print("  → Connect to ARC Labs: ssh arcgpu")
+            print("  → Or run: python3 check_gpu_connection.py")
+            sys.exit(1)
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        print(f"\033[92m✓ GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)\033[0m")
+    except ImportError:
+        print("\033[91m✗ PyTorch not installed!\033[0m")
+        sys.exit(1)
+
 from training.sgcl_trainer import SGCLConfig, SGCLTrainer, SGCLPipelineDemo
 
 
@@ -46,7 +64,7 @@ def main():
     
     # Training arguments
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size (4 for RTX 4090, 1 for ≤8GB GPUs)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
     
@@ -59,6 +77,10 @@ def main():
     parser.add_argument("--task-name", type=str, default="task_1", help="Task name for output")
     
     args = parser.parse_args()
+    
+    # Always check GPU first (unless demo mode)
+    if not args.demo:
+        check_gpu()
     
     # Demo mode
     if args.demo:

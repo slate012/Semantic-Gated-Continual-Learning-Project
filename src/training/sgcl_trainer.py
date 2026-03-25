@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
@@ -86,6 +87,7 @@ class SGCLConfig:
     max_seq_length: int = 512
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
+    load_in_4bit: bool = True              # 4-bit quantization (required for ≤8GB GPUs)
     
     # SG-CL specific settings
     enable_gating: bool = True          # Enable symbolic gating
@@ -181,7 +183,13 @@ class SGCLTrainer:
             config: Training configuration
         """
         self.config = config
-        self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        # Force CUDA — this project is designed for GPU only
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            logger.error("No CUDA GPU detected! This project requires an NVIDIA GPU.")
+            logger.error("Connect to ARC Labs: ssh arcgpu")
+            raise RuntimeError("CUDA GPU required. No GPU detected.")
         
         logger.info(f"Initializing SG-CL Trainer on device: {self.device}")
         
@@ -215,16 +223,39 @@ class SGCLTrainer:
         
         # Load base model
         logger.info("Loading base model (this may take a while)...")
+        
+        model_kwargs = {
+            "trust_remote_code": True,
+        }
+        
+        if self.config.load_in_4bit and self.device == "cuda":
+            # 4-bit quantization — reduces VRAM from ~13 GB to ~4.5 GB
+            logger.info("Using 4-bit quantization (NF4) to fit in low-VRAM GPU...")
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+            model_kwargs["quantization_config"] = bnb_config
+            model_kwargs["device_map"] = "auto"
+        else:
+            model_kwargs["torch_dtype"] = torch.float16 if self.device != "cpu" else torch.float32
+            if self.device == "cuda":
+                model_kwargs["device_map"] = "auto"
+        
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_path,
-            torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-            device_map="auto" if self.device == "cuda" else None,
-            trust_remote_code=True,
+            **model_kwargs
         )
         
         # Move to device if not using device_map
-        if self.device != "cuda":
+        if self.device not in ("cuda",) and "device_map" not in model_kwargs:
             self.model = self.model.to(self.device)
+        
+        # Prepare model for quantized training if using 4-bit
+        if self.config.load_in_4bit and self.device == "cuda":
+            self.model = prepare_model_for_kbit_training(self.model)
         
         # Configure LoRA
         logger.info("Configuring LoRA adapters...")

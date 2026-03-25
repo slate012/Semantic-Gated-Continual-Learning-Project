@@ -5,3 +5,6 @@ peft
 bitsandbytes
 requests
 huggingface_hub
+matplotlib
+numpy
+jupyter
