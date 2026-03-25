@@ -64,7 +64,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SGCLConfig:
-    """Configuration for SG-CL training."""
+    """Configuration for SG-CL training.
+    
+    Optimized for NVIDIA RTX 4090 (24GB VRAM, Ada Lovelace, Compute 8.9):
+    - BF16 precision (better numerical stability than FP16 on Ada)
+    - TF32 matmul for faster tensor core operations
+    - No 4-bit quantization needed (24GB fits full BF16 model)
+    - Batch size 8 with grad accum 2 = effective batch 16
+    """
     
     # Model settings
     model_path: str = "./models/llama-2-7b-hf"
@@ -79,15 +86,18 @@ class SGCLConfig:
         "gate_proj", "up_proj", "down_proj"       # MLP
     ])
     
-    # Training settings
+    # Training settings — optimized for RTX 4090 (24GB)
     learning_rate: float = 2e-4
-    batch_size: int = 4
-    gradient_accumulation_steps: int = 4
+    batch_size: int = 8                 # RTX 4090 can handle batch=8 in BF16
+    gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 = 16
     num_epochs: int = 3
     max_seq_length: int = 512
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
-    load_in_4bit: bool = True              # 4-bit quantization (required for ≤8GB GPUs)
+    load_in_4bit: bool = False             # Not needed for 24GB VRAM — use native BF16
+    use_bf16: bool = True                  # BF16 for Ada Lovelace (better than FP16)
+    enable_tf32: bool = True               # TF32 matmul for faster tensor cores
+    dataloader_num_workers: int = 4        # i9-14900 has plenty of CPU threads
     
     # SG-CL specific settings
     enable_gating: bool = True          # Enable symbolic gating
@@ -221,6 +231,12 @@ class SGCLTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         
+        # Enable TF32 for faster tensor core matmul on Ada Lovelace (RTX 4090)
+        if self.config.enable_tf32 and self.device == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("TF32 enabled for faster tensor core operations")
+        
         # Load base model
         logger.info("Loading base model (this may take a while)...")
         
@@ -229,29 +245,38 @@ class SGCLTrainer:
         }
         
         if self.config.load_in_4bit and self.device == "cuda":
-            # 4-bit quantization — reduces VRAM from ~13 GB to ~4.5 GB
+            # 4-bit quantization — for GPUs with <16GB VRAM
             logger.info("Using 4-bit quantization (NF4) to fit in low-VRAM GPU...")
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=torch.bfloat16 if self.config.use_bf16 else torch.float16,
                 bnb_4bit_use_double_quant=True,
             )
             model_kwargs["quantization_config"] = bnb_config
             model_kwargs["device_map"] = "auto"
         else:
-            model_kwargs["torch_dtype"] = torch.float16 if self.device != "cpu" else torch.float32
+            # Native precision — BF16 for Ada Lovelace (RTX 4090), FP16 fallback
+            if self.config.use_bf16 and torch.cuda.is_bf16_supported():
+                model_kwargs["torch_dtype"] = torch.bfloat16
+                logger.info("Using BF16 precision (optimal for Ada Lovelace / RTX 4090)")
+            else:
+                model_kwargs["torch_dtype"] = torch.float16
+                logger.info("Using FP16 precision")
             if self.device == "cuda":
                 model_kwargs["device_map"] = "auto"
+        
+        # Enable Flash Attention 2 if available
+        try:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+            logger.info("Flash Attention 2 enabled for memory-efficient attention")
+        except Exception:
+            logger.info("Flash Attention 2 not available, using default attention")
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_path,
             **model_kwargs
         )
-        
-        # Move to device if not using device_map
-        if self.device not in ("cuda",) and "device_map" not in model_kwargs:
-            self.model = self.model.to(self.device)
         
         # Prepare model for quantized training if using 4-bit
         if self.config.load_in_4bit and self.device == "cuda":
@@ -361,7 +386,11 @@ class SGCLTrainer:
         if eval_claims:
             eval_dataset, _ = self.prepare_data(eval_claims, apply_gating=False)
         
-        # Training arguments
+        # Determine precision flags
+        use_bf16 = self.config.use_bf16 and self.device == "cuda" and torch.cuda.is_bf16_supported()
+        use_fp16 = (not use_bf16) and self.device == "cuda"
+        
+        # Training arguments — optimized for RTX 4090
         training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=self.config.num_epochs,
@@ -376,8 +405,12 @@ class SGCLTrainer:
             evaluation_strategy="steps" if eval_dataset else "no",
             save_total_limit=2,
             load_best_model_at_end=True if eval_dataset else False,
-            fp16=self.device == "cuda",
-            report_to="none",  # Disable wandb/tensorboard for now
+            bf16=use_bf16,                # BF16 for Ada Lovelace (RTX 4090)
+            fp16=use_fp16,                # FP16 fallback for older GPUs
+            tf32=self.config.enable_tf32,  # TF32 matmul acceleration
+            dataloader_num_workers=self.config.dataloader_num_workers,
+            dataloader_pin_memory=True,    # Faster CPU→GPU transfer
+            report_to="none",
             remove_unused_columns=False,
         )
         

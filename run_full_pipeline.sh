@@ -55,12 +55,12 @@ OUTPUT_DIR="./outputs"
 DATA_DIR="./data"
 NUM_TASKS=5
 EPOCHS=3
-BATCH_SIZE=4                # RTX 4090 can handle batch=4 easily
+BATCH_SIZE=8                # RTX 4090 handles batch=8 in BF16 easily
 LEARNING_RATE=2e-4
 MAX_LENGTH=512              # Full sequence length (24GB can handle it)
 LORA_R=16
 LORA_ALPHA=32
-GRAD_ACCUM=4                # Effective batch = BATCH_SIZE * GRAD_ACCUM = 16
+GRAD_ACCUM=2                # Effective batch = BATCH_SIZE * GRAD_ACCUM = 16
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 0: Pre-flight Checks
@@ -171,14 +171,16 @@ echo "  Settings optimized for RTX 4090 (24 GB VRAM):"
 echo "    Batch size:                $BATCH_SIZE"
 echo "    Gradient accumulation:     $GRAD_ACCUM (effective batch = $((BATCH_SIZE * GRAD_ACCUM)))"
 echo "    Max sequence length:       $MAX_LENGTH"
-echo "    Quantization:              4-bit NF4 (enabled by default)"
+echo "    Precision:                 BF16 (native, no quantization)"
+echo "    TF32 matmul:               Enabled (Ada Lovelace tensor cores)"
+echo "    Flash Attention:           Enabled"
 echo "    LoRA rank:                 $LORA_R"
 echo ""
 echo "  Estimated VRAM usage:"
-echo "    Model (4-bit):             ~4.5 GB"
-echo "    LoRA + Optimizer:          ~1.2 GB"
-echo "    Activations (batch=4):     ~3.5 GB"
-echo "    Total:                     ~9.2 GB / 24.0 GB"
+echo "    Model (BF16):              ~13.5 GB"
+echo "    LoRA + Optimizer:          ~1.5 GB"
+echo "    Activations (batch=8):     ~5.0 GB"
+echo "    Total:                     ~20.0 GB / 24.0 GB"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 4: Smoke Test (1 Epoch, Task 1)

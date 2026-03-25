@@ -65,7 +65,7 @@ def main():
     
     # Training arguments
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size (4 for RTX 4090, 1 for ≤8GB GPUs)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (8 for RTX 4090 BF16, 1 for ≤8GB GPUs)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
     
