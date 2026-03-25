@@ -123,7 +123,7 @@ try:
         "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        "vram_gb": round(torch.cuda.get_device_properties(0).total_mem / (1024**3), 1) if torch.cuda.is_available() else 0
+        "vram_gb": round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1) if torch.cuda.is_available() else 0
     }
     print(json.dumps(info))
 except ImportError:
@@ -190,7 +190,7 @@ def check_local_gpu():
         import torch
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
-            vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             print(f"  {C.G}✓ Local GPU: {name} ({vram:.1f} GB){C.END}")
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             print(f"  {C.Y}ℹ Local device: Apple Silicon (MPS) — not suitable for this project{C.END}")
