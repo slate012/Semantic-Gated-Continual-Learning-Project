@@ -266,12 +266,15 @@ class SGCLTrainer:
             if self.device == "cuda":
                 model_kwargs["device_map"] = "auto"
         
-        # Enable Flash Attention 2 if available
+        # Try Flash Attention 2, fall back to SDPA (PyTorch native), then default
         try:
+            import flash_attn  # noqa: F401
             model_kwargs["attn_implementation"] = "flash_attention_2"
             logger.info("Flash Attention 2 enabled for memory-efficient attention")
-        except Exception:
-            logger.info("Flash Attention 2 not available, using default attention")
+        except ImportError:
+            # SDPA (Scaled Dot Product Attention) is built into PyTorch 2.0+
+            model_kwargs["attn_implementation"] = "sdpa"
+            logger.info("Using PyTorch SDPA attention (flash_attn not installed)")
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_path,
