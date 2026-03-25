@@ -88,8 +88,8 @@ class SGCLConfig:
     
     # Training settings — optimized for RTX 4090 (24GB)
     learning_rate: float = 2e-4
-    batch_size: int = 8                 # RTX 4090 can handle batch=8 in BF16
-    gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 = 16
+    batch_size: int = 4                 # RTX 4090 BF16 (safe for 24GB)
+    gradient_accumulation_steps: int = 4  # Effective batch = 4 * 4 = 16
     num_epochs: int = 3
     max_seq_length: int = 512
     warmup_ratio: float = 0.03
