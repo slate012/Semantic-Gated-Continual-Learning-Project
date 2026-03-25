@@ -405,7 +405,7 @@ class SGCLTrainer:
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
             eval_steps=self.config.eval_steps if eval_dataset else None,
-            evaluation_strategy="steps" if eval_dataset else "no",
+            eval_strategy="steps" if eval_dataset else "no",
             save_total_limit=2,
             load_best_model_at_end=True if eval_dataset else False,
             bf16=use_bf16,                # BF16 for Ada Lovelace (RTX 4090)
