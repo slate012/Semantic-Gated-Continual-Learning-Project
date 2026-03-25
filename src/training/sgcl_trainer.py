@@ -88,14 +88,14 @@ class SGCLConfig:
     
     # Training settings — optimized for RTX 4090 (24GB)
     learning_rate: float = 2e-4
-    batch_size: int = 4                 # RTX 4090 BF16 (safe for 24GB)
-    gradient_accumulation_steps: int = 4  # Effective batch = 4 * 4 = 16
+    batch_size: int = 8                 # 4-bit model is small, batch=8 fits easily
+    gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 = 16
     num_epochs: int = 3
     max_seq_length: int = 512
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
-    load_in_4bit: bool = False             # Not needed for 24GB VRAM — use native BF16
-    use_bf16: bool = True                  # BF16 for Ada Lovelace (better than FP16)
+    load_in_4bit: bool = True              # 4-bit NF4 quant (model ~4.5GB, leaves room)
+    use_bf16: bool = True                  # BF16 compute dtype for Ada Lovelace
     enable_tf32: bool = True               # TF32 matmul for faster tensor cores
     dataloader_num_workers: int = 4        # i9-14900 has plenty of CPU threads
     
