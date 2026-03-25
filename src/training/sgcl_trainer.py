@@ -204,7 +204,7 @@ class SGCLTrainer:
         logger.info(f"Initializing SG-CL Trainer on device: {self.device}")
         
         # Initialize SG-CL components
-        self.conceptnet = create_client()
+        self.conceptnet = create_client(local_only=True)  # Local knowledge base (no slow API calls)
         self.sid = create_sid(self.conceptnet)
         self.generator = create_generator(self.conceptnet)
         self.batch_constructor = create_batch_constructor(self.sid, self.generator)
