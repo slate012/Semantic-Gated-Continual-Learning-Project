@@ -589,6 +589,11 @@ def main():
             print_metrics_table("Baseline LLaMA", baseline_old_metrics, baseline_new_metrics)
 
             if args.adapter:
+                # Free baseline model from GPU before loading adapted model
+                import torch
+                del baseline_eval
+                torch.cuda.empty_cache()
+
                 print_section("Evaluating SG-CL Adapted Model")
                 adapted_eval = ModelEvaluator(args.model, adapter_path=args.adapter)
                 adapted_old = adapted_eval.evaluate(eval_data["old_knowledge"])
