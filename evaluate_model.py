@@ -74,7 +74,6 @@ def exact_match_score(prediction: str, expected: str) -> bool:
 
     # For yes/no answers, check the first token or overall sentiment
     if expected in ("yes", "no"):
-        # Extract the first word after any prompt echoing
         # Look for clear yes/no signals
         affirmatives = ["yes", "true", "correct", "indeed", "absolutely",
                         "certainly", "of course", "they can", "it can",
@@ -160,7 +159,7 @@ class ModelEvaluator:
         answer = full_output[len(prompt):].strip()
         return answer
 
-    def evaluate(self, facts: List[Dict]) -> List[Dict]:
+    def evaluate(self, facts: List[Dict], split_name: str = "") -> List[Dict]:
         """Evaluate the model on a list of QA facts."""
         results = []
         for fact in facts:
@@ -172,6 +171,7 @@ class ModelEvaluator:
                 "prediction": prediction,
                 "correct": correct,
                 "category": fact["category"],
+                "split": split_name,
             })
         return results
 
@@ -195,24 +195,18 @@ class DemoEvaluator:
     def _simulate_baseline_answer(self, fact: Dict) -> Tuple[str, bool]:
         """
         Simulate a baseline model's answer using knowledge base.
-        Baseline model is assumed to know common knowledge (old_knowledge)
-        reasonably well, but not perfectly.
+        Baseline model is assumed to know common knowledge reasonably well.
         """
         subject = fact.get("subject", "")
         relation = fact.get("relation", "")
         obj = fact.get("object", "")
         expected = fact["expected"]
 
-        # Query knowledge base for the fact
         conflict = self.client.detect_conflict(subject, relation, obj)
 
         if relation in ("CapableOf", "IsA", "HasProperty", "AtLocation", "UsedFor"):
             if not conflict.has_conflict:
-                prediction = "yes" if expected == "yes" else "yes"
-                # Baseline knows common facts but may not know negatives well
                 if expected == "no":
-                    # Baseline sometimes says "yes" to things that are false
-                    # (this is the corruption we're trying to prevent)
                     prediction = "no"
                 else:
                     prediction = "yes"
@@ -240,10 +234,8 @@ class DemoEvaluator:
         obj = fact.get("object", "")
         expected = fact["expected"]
 
-        # SG-CL with gating should preserve knowledge correctly
         conflict = self.client.detect_conflict(subject, relation, obj)
 
-        # SG-CL retains old knowledge because guard-rails reinforce it
         if relation in ("CapableOf", "IsA", "HasProperty", "AtLocation", "UsedFor"):
             if not conflict.has_conflict:
                 prediction = "yes"
@@ -283,44 +275,24 @@ class DemoEvaluator:
     def evaluate_all(self, eval_data: Dict) -> Dict:
         """Run full simulated evaluation for baseline, naive FT, and SG-CL."""
         results = {
-            "baseline": {"old": [], "new": []},
-            "naive_ft": {"old": [], "new": []},
-            "sgcl": {"old": [], "new": []},
+            "baseline": {"old": [], "new": [], "conflict": []},
+            "naive_ft": {"old": [], "new": [], "conflict": []},
+            "sgcl": {"old": [], "new": [], "conflict": []},
         }
 
-        for fact in eval_data["old_knowledge"]:
-            # Baseline
-            pred, correct = self._simulate_baseline_answer(fact)
-            results["baseline"]["old"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
-            # Naive FT
-            pred, correct = self._simulate_naive_finetuned_answer(fact, is_old=True)
-            results["naive_ft"]["old"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
-            # SG-CL
-            pred, correct = self._simulate_sgcl_answer(fact)
-            results["sgcl"]["old"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
-
-        for fact in eval_data["new_knowledge"]:
-            # Baseline
-            pred, correct = self._simulate_baseline_answer(fact)
-            results["baseline"]["new"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
-            # Naive FT
-            pred, correct = self._simulate_naive_finetuned_answer(fact, is_old=False)
-            results["naive_ft"]["new"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
-            # SG-CL
-            pred, correct = self._simulate_sgcl_answer(fact)
-            results["sgcl"]["new"].append({
-                **fact, "prediction": pred, "correct": correct
-            })
+        for split in ["old_knowledge", "new_knowledge", "conflict_knowledge"]:
+            short_split = split.split("_")[0]  # old, new, conflict
+            facts = eval_data.get(split, [])
+            for fact in facts:
+                # Baseline
+                pred, correct = self._simulate_baseline_answer(fact)
+                results["baseline"][short_split].append({**fact, "prediction": pred, "correct": correct})
+                # Naive FT
+                pred, correct = self._simulate_naive_finetuned_answer(fact, is_old=(short_split == "old"))
+                results["naive_ft"][short_split].append({**fact, "prediction": pred, "correct": correct})
+                # SG-CL
+                pred, correct = self._simulate_sgcl_answer(fact)
+                results["sgcl"][short_split].append({**fact, "prediction": pred, "correct": correct})
 
         return results
 
@@ -361,13 +333,22 @@ def compute_metrics(results: List[Dict]) -> Dict:
 
 def compute_forgetting_score(baseline_acc: float, adapted_acc: float) -> float:
     """
-    Forgetting Score = baseline_old_acc - adapted_old_acc
-    
-    A positive score means the model forgot old knowledge.
-    A negative score means the model actually improved on old knowledge.
+    Forgetting Score = baseline_acc - adapted_acc
+
+    A positive score means the model forgot knowledge.
+    A negative score means the model actually improved.
     Zero means perfect retention.
     """
     return baseline_acc - adapted_acc
+
+
+def build_method_metrics(results_dict: Dict) -> Dict:
+    """Build a structured metrics dict for one method from raw results."""
+    metrics = {}
+    for split in ["old", "new", "conflict"]:
+        if split in results_dict and results_dict[split]:
+            metrics[f"{split}_accuracy"] = compute_metrics(results_dict[split])
+    return metrics
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -386,84 +367,118 @@ def print_section(text: str):
     print(f"{Colors.YELLOW}{'─' * 60}{Colors.END}\n")
 
 
-def print_metrics_table(label: str, old_metrics: Dict, new_metrics: Dict):
-    """Print a formatted metrics table."""
+def print_metrics_table(label: str, metrics: Dict):
+    """Print a formatted metrics table supporting old/new/conflict splits."""
     print(f"  {Colors.BOLD}{label}{Colors.END}")
-    print(f"  {'─' * 55}")
+    print(f"  {'─' * 70}")
+
+    splits = []
+    for split in ["old", "new", "conflict"]:
+        key = f"{split}_accuracy"
+        if key in metrics:
+            splits.append((split.capitalize() + " Knowledge", metrics[key]))
+
+    if not splits:
+        print("  No metrics available\n")
+        return
 
     # Header
-    print(f"  {'Category':<20} {'Old Knowledge':>15} {'New Knowledge':>15}")
-    print(f"  {'─' * 55}")
+    headers = [s[0] for s in splits]
+    print(f"  {'Category':<20}" + "".join(f"{h:>18}" for h in headers))
+    print(f"  {'─' * 70}")
 
     # Gather all categories
     categories = sorted(set(
-        list(old_metrics["by_category"].keys()) +
-        list(new_metrics["by_category"].keys())
+        cat
+        for _, m in splits
+        for cat in m.get("by_category", {}).keys()
     ))
 
     for cat in categories:
-        old_cat = old_metrics["by_category"].get(cat, {"accuracy": 0, "correct": 0, "total": 0})
-        new_cat = new_metrics["by_category"].get(cat, {"accuracy": 0, "correct": 0, "total": 0})
+        row = f"  {cat:<20}"
+        for _, m in splits:
+            cat_data = m.get("by_category", {}).get(cat, {"accuracy": 0, "correct": 0, "total": 0})
+            row += f"{cat_data['correct']:>4}/{cat_data['total']:<4} ({cat_data['accuracy']:.0%})  "
+        print(row)
 
-        old_str = f"{old_cat['correct']}/{old_cat['total']} ({old_cat['accuracy']:.0%})"
-        new_str = f"{new_cat['correct']}/{new_cat['total']} ({new_cat['accuracy']:.0%})"
-        print(f"  {cat:<20} {old_str:>15} {new_str:>15}")
-
-    print(f"  {'─' * 55}")
-    old_overall = f"{old_metrics['correct']}/{old_metrics['total']} ({old_metrics['accuracy']:.0%})"
-    new_overall = f"{new_metrics['correct']}/{new_metrics['total']} ({new_metrics['accuracy']:.0%})"
-    print(f"  {Colors.BOLD}{'OVERALL':<20}{Colors.END} {old_overall:>15} {new_overall:>15}")
+    print(f"  {'─' * 70}")
+    overall_row = f"  {Colors.BOLD}{'OVERALL':<20}{Colors.END}"
+    for _, m in splits:
+        overall_row += f"{m['correct']:>4}/{m['total']:<4} ({m['accuracy']:.0%})  "
+    print(overall_row)
     print()
 
 
-def print_comparison_summary(baseline_old: float, naive_old: float, sgcl_old: float,
-                              baseline_new: float, naive_new: float, sgcl_new: float):
+def print_comparison_summary(methods: Dict):
     """Print a side-by-side comparison summary."""
     print_section("Comparison Summary")
 
-    print(f"  {'Method':<25} {'Old Knowledge':>15} {'New Knowledge':>15} {'Forgetting':>12}")
-    print(f"  {'─' * 70}")
+    has_naive = "naive_ft" in methods
+    headers = ["Method", "Old Knowledge", "New Knowledge"]
+    if any("conflict_accuracy" in methods[m] for m in methods):
+        headers.append("Conflict Rejection")
 
-    fg_baseline = compute_forgetting_score(baseline_old, baseline_old)
-    fg_naive = compute_forgetting_score(baseline_old, naive_old)
-    fg_sgcl = compute_forgetting_score(baseline_old, sgcl_old)
+    header_line = f"  {'Method':<25}"
+    for h in headers[1:]:
+        header_line += f"{h:>18}"
+    print(header_line)
+    print(f"  {'─' * 75}")
 
-    def color_acc(val):
-        if val >= 0.9:
-            return f"{Colors.GREEN}{val:.0%}{Colors.END}"
-        elif val >= 0.7:
-            return f"{Colors.YELLOW}{val:.0%}{Colors.END}"
-        else:
-            return f"{Colors.RED}{val:.0%}{Colors.END}"
+    def get_acc(method, split):
+        key = f"{split}_accuracy"
+        if key in methods[method]:
+            return methods[method][key]["accuracy"]
+        return None
 
-    def color_fg(val):
-        if val <= 0.0:
-            return f"{Colors.GREEN}{val:+.0%}{Colors.END}"
-        elif val <= 0.1:
-            return f"{Colors.YELLOW}{val:+.0%}{Colors.END}"
-        else:
-            return f"{Colors.RED}{val:+.0%}{Colors.END}"
+    baseline_old = get_acc("baseline", "old")
 
-    # Note: ANSI codes break alignment, so we use fixed-width padding
-    print(f"  {'Baseline (no FT)':<25} {baseline_old:>11.0%}     {baseline_new:>11.0%}     {fg_baseline:>+8.0%}")
-    print(f"  {'Naive Fine-Tuning':<25} {naive_old:>11.0%}     {naive_new:>11.0%}     {fg_naive:>+8.0%}")
-    print(f"  {Colors.BOLD}{'SG-CL (Ours)':<25}{Colors.END} {sgcl_old:>11.0%}     {sgcl_new:>11.0%}     {fg_sgcl:>+8.0%}")
+    for method, display in [
+        ("baseline", "Baseline (no FT)"),
+        ("naive_ft", "Naive Fine-Tuning"),
+        ("sgcl", "SG-CL (Ours)"),
+    ]:
+        if method not in methods:
+            continue
+        old = get_acc(method, "old")
+        new = get_acc(method, "new")
+        conf = get_acc(method, "conflict")
+
+        old_str = f"{old:.0%}" if old is not None else "N/A"
+        new_str = f"{new:.0%}" if new is not None else "N/A"
+        conf_str = f"{conf:.0%}" if conf is not None else "N/A"
+
+        fg = compute_forgetting_score(baseline_old, old) if old is not None else None
+        fg_str = f"{fg:+.0%}" if fg is not None else "N/A"
+
+        line = f"  {display:<25}{old_str:>11}{new_str:>18}"
+        if conf is not None:
+            line += f"{conf_str:>18}"
+        line += f"{fg_str:>12}"
+        print(line)
+
     print()
 
     # Interpretation
-    print_section("Interpretation")
-    if fg_sgcl < fg_naive:
-        print(f"  {Colors.GREEN}✓ SG-CL reduces catastrophic forgetting!{Colors.END}")
-        print(f"    Naive FT forgetting: {fg_naive:.0%}")
-        print(f"    SG-CL forgetting:    {fg_sgcl:.0%}")
-        improvement = fg_naive - fg_sgcl
-        print(f"    Improvement:         {improvement:.0%} less forgetting")
-    else:
-        print(f"  {Colors.YELLOW}⚠ Results are comparable between methods.{Colors.END}")
+    if "sgcl" in methods and "naive_ft" in methods:
+        sgcl_old = get_acc("sgcl", "old")
+        naive_old = get_acc("naive_ft", "old")
+        sgcl_new = get_acc("sgcl", "new")
+        naive_new = get_acc("naive_ft", "new")
 
-    if sgcl_new >= naive_new * 0.9:
-        print(f"\n  {Colors.GREEN}✓ SG-CL maintains new knowledge acquisition{Colors.END}")
-        print(f"    SG-CL learns {sgcl_new:.0%} of new knowledge (vs {naive_new:.0%} for naive FT)")
+        fg_sgcl = compute_forgetting_score(baseline_old, sgcl_old)
+        fg_naive = compute_forgetting_score(baseline_old, naive_old)
+
+        if fg_sgcl < fg_naive:
+            print(f"  {Colors.GREEN}✓ SG-CL reduces catastrophic forgetting{Colors.END}")
+            print(f"    Naive FT forgetting: {fg_naive:.0%}")
+            print(f"    SG-CL forgetting:    {fg_sgcl:.0%}")
+        else:
+            print(f"  {Colors.YELLOW}⚠ SG-CL does not improve forgetting vs naive FT{Colors.END}")
+
+        if sgcl_new >= naive_new * 0.9:
+            print(f"  {Colors.GREEN}✓ SG-CL maintains new knowledge acquisition{Colors.END}")
+        else:
+            print(f"  {Colors.YELLOW}⚠ SG-CL lags on new knowledge acquisition{Colors.END}")
 
 
 def print_detailed_results(results: List[Dict], label: str, max_show: int = 10):
@@ -474,6 +489,61 @@ def print_detailed_results(results: List[Dict], label: str, max_show: int = 10):
         status = f"{Colors.GREEN}✓{Colors.END}" if r["correct"] else f"{Colors.RED}✗{Colors.END}"
         print(f"    {status} Q: {r['question']}")
         print(f"        Expected: {r['expected']}  |  Predicted: {r['prediction']}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Structured Results Builder
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_save_results(
+    mode: str,
+    eval_data: Dict,
+    eval_data_path: str,
+    methods: Dict,
+    model_path: Optional[str] = None,
+    adapter_path: Optional[str] = None
+) -> Dict:
+    """Build the structured results dictionary saved to JSON."""
+    save_methods = {}
+    baseline_old_acc = None
+
+    for method_name, method_metrics in methods.items():
+        method_entry = {}
+        for split in ["old", "new", "conflict"]:
+            key = f"{split}_accuracy"
+            if key in method_metrics:
+                m = method_metrics[key]
+                method_entry[f"{split}_accuracy"] = m["accuracy"]
+                method_entry[f"{split}_by_category"] = m["by_category"]
+                method_entry[f"{split}_correct"] = m["correct"]
+                method_entry[f"{split}_total"] = m["total"]
+
+        # Forgetting score uses old-knowledge accuracy
+        if "old_accuracy" in method_entry:
+            if method_name == "baseline":
+                baseline_old_acc = method_entry["old_accuracy"]
+            if baseline_old_acc is not None:
+                method_entry["forgetting_score"] = compute_forgetting_score(
+                    baseline_old_acc, method_entry["old_accuracy"]
+                )
+
+        save_methods[method_name] = method_entry
+
+    result = {
+        "mode": mode,
+        "eval_data_path": eval_data_path,
+        "num_old_facts": len(eval_data.get("old_knowledge", [])),
+        "num_new_facts": len(eval_data.get("new_knowledge", [])),
+        "num_conflict_facts": len(eval_data.get("conflict_knowledge", [])),
+        "methods": save_methods,
+    }
+
+    if model_path:
+        result["model_path"] = model_path
+    if adapter_path:
+        result["adapter_path"] = adapter_path
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -508,11 +578,14 @@ def main():
     # ── Load eval data ──────────────────────────────────────────────────────
     print_section("Loading Evaluation Data")
     eval_data = load_eval_data(args.eval_data)
-    n_old = len(eval_data["old_knowledge"])
-    n_new = len(eval_data["new_knowledge"])
+    n_old = len(eval_data.get("old_knowledge", []))
+    n_new = len(eval_data.get("new_knowledge", []))
+    n_conflict = len(eval_data.get("conflict_knowledge", []))
     print(f"  Old knowledge facts: {n_old}")
     print(f"  New knowledge facts: {n_new}")
-    print(f"  Total: {n_old + n_new}")
+    if n_conflict:
+        print(f"  Conflict facts: {n_conflict}")
+    print(f"  Total: {n_old + n_new + n_conflict}")
 
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
@@ -525,12 +598,10 @@ def main():
         evaluator = DemoEvaluator()
         all_results = evaluator.evaluate_all(eval_data)
 
-        # Compute metrics for each method
         methods = {}
         for method_name in ["baseline", "naive_ft", "sgcl"]:
-            old_metrics = compute_metrics(all_results[method_name]["old"])
-            new_metrics = compute_metrics(all_results[method_name]["new"])
-            methods[method_name] = {"old": old_metrics, "new": new_metrics}
+            method_metrics = build_method_metrics(all_results[method_name])
+            methods[method_name] = method_metrics
 
             display_name = {
                 "baseline": "Baseline LLaMA (No Fine-Tuning)",
@@ -538,55 +609,41 @@ def main():
                 "sgcl": "SG-CL LoRA (With Gating)",
             }[method_name]
 
-            print_metrics_table(display_name, old_metrics, new_metrics)
+            print_metrics_table(display_name, method_metrics)
 
         # Detailed results
         if args.verbose:
             print_detailed_results(all_results["sgcl"]["old"], "SG-CL — Old Knowledge")
             print_detailed_results(all_results["sgcl"]["new"], "SG-CL — New Knowledge")
+            if all_results["sgcl"]["conflict"]:
+                print_detailed_results(all_results["sgcl"]["conflict"], "SG-CL — Conflict Rejection")
 
         # Comparison
-        print_comparison_summary(
-            baseline_old=methods["baseline"]["old"]["accuracy"],
-            naive_old=methods["naive_ft"]["old"]["accuracy"],
-            sgcl_old=methods["sgcl"]["old"]["accuracy"],
-            baseline_new=methods["baseline"]["new"]["accuracy"],
-            naive_new=methods["naive_ft"]["new"]["accuracy"],
-            sgcl_new=methods["sgcl"]["new"]["accuracy"],
-        )
+        print_comparison_summary(methods)
 
         # Save results
-        save_results = {
-            "mode": "demo",
-            "eval_data_path": args.eval_data,
-            "num_old_facts": n_old,
-            "num_new_facts": n_new,
-            "methods": {
-                name: {
-                    "old_accuracy": m["old"]["accuracy"],
-                    "new_accuracy": m["new"]["accuracy"],
-                    "old_by_category": m["old"]["by_category"],
-                    "new_by_category": m["new"]["by_category"],
-                    "forgetting_score": compute_forgetting_score(
-                        methods["baseline"]["old"]["accuracy"],
-                        m["old"]["accuracy"]
-                    ),
-                }
-                for name, m in methods.items()
-            },
-        }
+        save_results = build_save_results(
+            mode="demo",
+            eval_data=eval_data,
+            eval_data_path=args.eval_data,
+            methods=methods,
+        )
 
     # ── Full Model Mode ─────────────────────────────────────────────────────
     else:
+        methods = {}
+
         if args.compare:
             print_section("Evaluating Baseline Model")
             baseline_eval = ModelEvaluator(args.model, adapter_path=None)
-            baseline_old = baseline_eval.evaluate(eval_data["old_knowledge"])
-            baseline_new = baseline_eval.evaluate(eval_data["new_knowledge"])
-
-            baseline_old_metrics = compute_metrics(baseline_old)
-            baseline_new_metrics = compute_metrics(baseline_new)
-            print_metrics_table("Baseline LLaMA", baseline_old_metrics, baseline_new_metrics)
+            baseline_results = {
+                "old": baseline_eval.evaluate(eval_data.get("old_knowledge", []), split_name="old"),
+                "new": baseline_eval.evaluate(eval_data.get("new_knowledge", []), split_name="new"),
+                "conflict": baseline_eval.evaluate(eval_data.get("conflict_knowledge", []), split_name="conflict"),
+            }
+            baseline_metrics = build_method_metrics(baseline_results)
+            methods["baseline"] = baseline_metrics
+            print_metrics_table("Baseline LLaMA", baseline_metrics)
 
             if args.adapter:
                 # Free baseline model from GPU before loading adapted model
@@ -596,17 +653,19 @@ def main():
 
                 print_section("Evaluating SG-CL Adapted Model")
                 adapted_eval = ModelEvaluator(args.model, adapter_path=args.adapter)
-                adapted_old = adapted_eval.evaluate(eval_data["old_knowledge"])
-                adapted_new = adapted_eval.evaluate(eval_data["new_knowledge"])
-
-                adapted_old_metrics = compute_metrics(adapted_old)
-                adapted_new_metrics = compute_metrics(adapted_new)
-                print_metrics_table("SG-CL LoRA Adapted", adapted_old_metrics, adapted_new_metrics)
+                adapted_results = {
+                    "old": adapted_eval.evaluate(eval_data.get("old_knowledge", []), split_name="old"),
+                    "new": adapted_eval.evaluate(eval_data.get("new_knowledge", []), split_name="new"),
+                    "conflict": adapted_eval.evaluate(eval_data.get("conflict_knowledge", []), split_name="conflict"),
+                }
+                adapted_metrics = build_method_metrics(adapted_results)
+                methods["sgcl"] = adapted_metrics
+                print_metrics_table("SG-CL LoRA Adapted", adapted_metrics)
 
                 # Forgetting score
                 fg = compute_forgetting_score(
-                    baseline_old_metrics["accuracy"],
-                    adapted_old_metrics["accuracy"]
+                    baseline_metrics["old_accuracy"]["accuracy"],
+                    adapted_metrics["old_accuracy"]["accuracy"]
                 )
                 print_section("Forgetting Analysis")
                 if fg > 0:
@@ -616,6 +675,12 @@ def main():
                     print(f"  {Colors.GREEN}Forgetting Score: {fg:+.2%}{Colors.END}")
                     print(f"  No catastrophic forgetting detected!")
 
+                if args.verbose:
+                    print_detailed_results(adapted_results["old"], "SG-CL — Old Knowledge")
+                    print_detailed_results(adapted_results["new"], "SG-CL — New Knowledge")
+                    if adapted_results["conflict"]:
+                        print_detailed_results(adapted_results["conflict"], "SG-CL — Conflict Rejection")
+
         else:
             # Single model evaluation
             adapter = args.adapter
@@ -624,27 +689,32 @@ def main():
             print_section(f"Evaluating {label}")
             evaluator = ModelEvaluator(args.model, adapter_path=adapter)
 
-            old_results = evaluator.evaluate(eval_data["old_knowledge"])
-            new_results = evaluator.evaluate(eval_data["new_knowledge"])
+            single_results = {
+                "old": evaluator.evaluate(eval_data.get("old_knowledge", []), split_name="old"),
+                "new": evaluator.evaluate(eval_data.get("new_knowledge", []), split_name="new"),
+                "conflict": evaluator.evaluate(eval_data.get("conflict_knowledge", []), split_name="conflict"),
+            }
+            single_metrics = build_method_metrics(single_results)
+            method_key = "sgcl" if adapter else "baseline"
+            methods[method_key] = single_metrics
 
-            old_metrics = compute_metrics(old_results)
-            new_metrics = compute_metrics(new_results)
-
-            print_metrics_table(label, old_metrics, new_metrics)
+            print_metrics_table(label, single_metrics)
 
             if args.verbose:
-                print_detailed_results(old_results, "Old Knowledge")
-                print_detailed_results(new_results, "New Knowledge")
+                print_detailed_results(single_results["old"], "Old Knowledge")
+                print_detailed_results(single_results["new"], "New Knowledge")
+                if single_results["conflict"]:
+                    print_detailed_results(single_results["conflict"], "Conflict Rejection")
 
         # Save results for full mode
-        save_results = {
-            "mode": "full",
-            "model_path": args.model,
-            "adapter_path": args.adapter,
-            "eval_data_path": args.eval_data,
-            "num_old_facts": n_old,
-            "num_new_facts": n_new,
-        }
+        save_results = build_save_results(
+            mode="full",
+            eval_data=eval_data,
+            eval_data_path=args.eval_data,
+            methods=methods,
+            model_path=args.model,
+            adapter_path=args.adapter,
+        )
 
     # ── Save ────────────────────────────────────────────────────────────────
     results_path = os.path.join(args.output, "eval_results.json")

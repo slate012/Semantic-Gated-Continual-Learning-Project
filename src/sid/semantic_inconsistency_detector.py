@@ -429,18 +429,26 @@ class SemanticInconsistencyDetector:
     5. Conflict detection
     """
     
-    def __init__(self, conceptnet_client: Optional[ConceptNetClient] = None):
+    def __init__(
+        self, 
+        conceptnet_client: Optional[ConceptNetClient] = None,
+        conflict_threshold: float = 0.5
+    ):
         """
         Initialize SID.
         
         Args:
             conceptnet_client: ConceptNet client for conflict detection.
                              If None, creates a default client.
+            conflict_threshold: Minimum conflict strength [0,1] required to
+                               trigger gated training. Lower values let more
+                               conflicting claims through as normal training.
         """
         self.normalizer = TextNormalizer()
         self.entity_extractor = EntityExtractor(self.normalizer)
         self.relation_extractor = RelationExtractor()
         self.conceptnet = conceptnet_client or create_client()
+        self.conflict_threshold = conflict_threshold
     
     def analyze(self, text: str) -> Optional[ClaimClassification]:
         """
@@ -509,11 +517,18 @@ class SemanticInconsistencyDetector:
         """
         Classify the conflict and determine gating decision.
         
+        Uses conflict strength vs. threshold to allow low-confidence conflicts
+        to be learned normally, improving plasticity for new knowledge.
+        
         Returns:
             (classification, gating_decision)
         """
         if not conflict_result.has_conflict:
             return "safe", "normal_training"
+        
+        # If below threshold, treat as safe to allow new knowledge through
+        if conflict_result.strength < self.conflict_threshold:
+            return "conditional", "normal_training"
         
         if conflict_result.conflict_type == "direct":
             return "hard_conflict", "gated_training"
@@ -585,9 +600,12 @@ class SemanticInconsistencyDetector:
 # Package Init 
 # =============================================================================
 
-def create_sid(conceptnet_client: Optional[ConceptNetClient] = None) -> SemanticInconsistencyDetector:
+def create_sid(
+    conceptnet_client: Optional[ConceptNetClient] = None,
+    conflict_threshold: float = 0.5
+) -> SemanticInconsistencyDetector:
     """Create a SID instance with default settings."""
-    return SemanticInconsistencyDetector(conceptnet_client)
+    return SemanticInconsistencyDetector(conceptnet_client, conflict_threshold=conflict_threshold)
 
 
 # =============================================================================

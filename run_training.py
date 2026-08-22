@@ -64,14 +64,22 @@ def main():
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha")
     
     # Training arguments
-    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size (8 for RTX 4090 4-bit)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
-    
+    parser.add_argument("--task-lr-decay", type=float, default=0.9, help="LR decay factor per subsequent task")
+    parser.add_argument("--new-task-lr-boost", type=float, default=1.5, help="LR multiplier for tasks after the first")
+
     # SG-CL arguments
     parser.add_argument("--gating", action="store_true", help="Enable symbolic gating")
     parser.add_argument("--no-gating", action="store_true", help="Disable symbolic gating")
+    parser.add_argument("--guard-rail-weight", type=float, default=0.3, help="Global guard-rail loss weight")
+    parser.add_argument("--conflict-threshold", type=float, default=0.7, help="Min conflict strength to trigger gating")
+    parser.add_argument("--use-kd", action="store_true", help="Enable knowledge distillation")
+    parser.add_argument("--kd-weight", type=float, default=0.3, help="Knowledge distillation loss weight")
+    parser.add_argument("--freeze-lower-layers", action="store_true", help="Freeze LoRA in lower transformer layers")
+    parser.add_argument("--freeze-layer-threshold", type=int, default=20, help="Freeze LoRA in layers <= this index")
     
     # Mode arguments
     parser.add_argument("--demo", action="store_true", help="Run demo mode only (no training)")
@@ -128,7 +136,15 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         max_seq_length=args.max_length,
-        enable_gating=not args.no_gating if args.no_gating else args.gating,
+        enable_gating=not args.no_gating,
+        guard_rail_weight=args.guard_rail_weight,
+        conflict_threshold=args.conflict_threshold,
+        task_lr_decay=args.task_lr_decay,
+        new_task_lr_boost=args.new_task_lr_boost,
+        use_knowledge_distillation=args.use_kd,
+        kd_weight=args.kd_weight,
+        freeze_lower_layers=args.freeze_lower_layers,
+        freeze_layer_threshold=args.freeze_layer_threshold,
     )
     
     print(f"\nConfiguration:")
@@ -136,6 +152,8 @@ def main():
     print(f"  LoRA rank: {config.lora_r}, alpha: {config.lora_alpha}")
     print(f"  Epochs: {config.num_epochs}, Batch size: {config.batch_size}")
     print(f"  Gating enabled: {config.enable_gating}")
+    print(f"  Guard-rail weight: {config.guard_rail_weight}")
+    print(f"  Conflict threshold: {config.conflict_threshold}")
     
     # Create trainer
     trainer = SGCLTrainer(config)

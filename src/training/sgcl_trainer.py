@@ -19,6 +19,7 @@ Training Philosophy:
 
 import os
 import sys
+import re
 import json
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -40,6 +41,7 @@ from transformers import (
     Trainer,
     DataCollatorForLanguageModeling,
 )
+import torch.nn.functional as F
 from peft import (
     LoraConfig,
     get_peft_model,
@@ -78,8 +80,8 @@ class SGCLConfig:
     output_dir: str = "./outputs"
     
     # LoRA settings
-    lora_r: int = 16                    # LoRA rank
-    lora_alpha: int = 32                # LoRA alpha (scaling)
+    lora_r: int = 32                    # LoRA rank (increased for more plasticity)
+    lora_alpha: int = 64                # LoRA alpha (scaling, keep ~2x rank)
     lora_dropout: float = 0.05         # LoRA dropout
     lora_target_modules: List[str] = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",  # Attention
@@ -90,7 +92,7 @@ class SGCLConfig:
     learning_rate: float = 2e-4
     batch_size: int = 8                 # 4-bit model is small, batch=8 fits easily
     gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 = 16
-    num_epochs: int = 3
+    num_epochs: int = 5                 # More epochs to absorb new knowledge
     max_seq_length: int = 512
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
@@ -101,8 +103,22 @@ class SGCLConfig:
     
     # SG-CL specific settings
     enable_gating: bool = True          # Enable symbolic gating
-    guard_rail_weight: float = 1.0      # Weight for guard-rail samples
+    guard_rail_weight: float = 0.3      # Weight for guard-rail samples (<1.0 = more plastic)
+    conflict_claim_weight: float = 1.0  # Weight for the original conflicting claim
+    conflict_threshold: float = 0.7     # Min conflict strength to trigger gating
     max_guard_rails: int = 5            # Max guard-rails per conflict
+
+    # Continual learning settings
+    task_lr_decay: float = 0.9          # LR decay factor per subsequent task
+    new_task_lr_boost: float = 1.5      # LR multiplier for tasks after the first
+    
+    # Knowledge distillation (LwF-style)
+    use_knowledge_distillation: bool = False
+    kd_weight: float = 0.3              # Weight of distillation loss
+    
+    # Selective layer freezing
+    freeze_lower_layers: bool = False   # Freeze LoRA in lower transformer layers
+    freeze_layer_threshold: int = 20    # Only train LoRA in layers above this index
     
     # Logging
     logging_steps: int = 10
@@ -167,11 +183,113 @@ class SGCLDataset(Dataset):
             "labels": encoding["input_ids"].squeeze(),
         }
         
-        # Add weight if needed
+        # Add per-sample weight for custom loss
         if self.weights:
-            item["weight"] = torch.tensor(self.weights[idx])
+            item["sample_weight"] = torch.tensor(self.weights[idx], dtype=torch.float32)
         
         return item
+
+
+class SGCLDataCollator(DataCollatorForLanguageModeling):
+    """
+    Data collator that preserves per-sample weights for SG-CL training.
+    """
+    
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        # Separate sample weights before default collating
+        sample_weights = None
+        if features and "sample_weight" in features[0]:
+            sample_weights = torch.stack([f.pop("sample_weight") for f in features])
+        
+        batch = super().__call__(features)
+        
+        if sample_weights is not None:
+            batch["sample_weight"] = sample_weights
+        
+        return batch
+
+
+class SGCLHuggingFaceTrainer(Trainer):
+    """
+    Custom HuggingFace Trainer that applies per-sample weights and optional
+    knowledge-distillation loss.
+    """
+    
+    def __init__(self, teacher_model=None, kd_weight=0.0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.teacher_model = teacher_model
+        self.kd_weight = kd_weight
+    
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """
+        Compute weighted causal LM loss with optional knowledge distillation.
+        """
+        sample_weight = inputs.pop("sample_weight", None)
+        
+        # Standard causal LM forward
+        outputs = model(**inputs)
+        logits = outputs.logits
+        labels = inputs.get("labels")
+        
+        # Shift for causal LM: predict next token
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        shift_attention_mask = inputs.get("attention_mask", None)
+        if shift_attention_mask is not None:
+            shift_attention_mask = shift_attention_mask[..., 1:].contiguous()
+        
+        # Flatten tokens
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        token_loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1)
+        )
+        
+        # Build mask for non-padding tokens (labels == -100 are padding in HF)
+        if shift_attention_mask is not None:
+            mask = (shift_labels.view(-1) != -100).float()
+            token_loss = token_loss * mask
+        else:
+            mask = None
+        
+        # Reshape to [batch_size, seq_len-1]
+        token_loss = token_loss.view(shift_labels.size())
+        
+        # Per-sample mean loss
+        if mask is not None:
+            mask_2d = mask.view(shift_labels.size())
+            per_sample_loss = token_loss.sum(dim=1) / (mask_2d.sum(dim=1) + 1e-8)
+        else:
+            per_sample_loss = token_loss.mean(dim=1)
+        
+        # Apply sample weights
+        if sample_weight is not None:
+            per_sample_loss = per_sample_loss * sample_weight.to(per_sample_loss.device)
+        
+        loss = per_sample_loss.mean()
+        
+        # Optional knowledge distillation
+        if self.teacher_model is not None and self.kd_weight > 0:
+            with torch.no_grad():
+                teacher_outputs = self.teacher_model(**inputs)
+                teacher_logits = teacher_outputs.logits[..., :-1, :].contiguous()
+            
+            # KL divergence on valid tokens only
+            kl_loss = F.kl_div(
+                F.log_softmax(shift_logits, dim=-1),
+                F.softmax(teacher_logits, dim=-1),
+                reduction='none'
+            ).sum(dim=-1)
+            
+            if mask is not None:
+                mask_2d = mask.view(shift_labels.size())
+                kl_loss = (kl_loss * mask_2d).sum(dim=1) / (mask_2d.sum(dim=1) + 1e-8)
+            else:
+                kl_loss = kl_loss.mean(dim=1)
+            
+            loss = loss + self.kd_weight * kl_loss.mean()
+        
+        return (loss, outputs) if return_outputs else loss
 
 
 class SGCLTrainer:
@@ -193,26 +311,38 @@ class SGCLTrainer:
             config: Training configuration
         """
         self.config = config
-        # Force CUDA — this project is designed for GPU only
+        # Prefer CUDA for full training, but allow MPS (Apple Silicon) or CPU
+        # for local development / demo / smoke tests.
         if torch.cuda.is_available():
             self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.warning("MPS device detected (Apple Silicon). Full training is recommended on NVIDIA GPU.")
         else:
-            logger.error("No CUDA GPU detected! This project requires an NVIDIA GPU.")
-            logger.error("Connect to ARC Labs: ssh arcgpu")
-            raise RuntimeError("CUDA GPU required. No GPU detected.")
+            self.device = "cpu"
+            logger.warning("CPU device detected. Full training is recommended on NVIDIA GPU.")
         
         logger.info(f"Initializing SG-CL Trainer on device: {self.device}")
         
         # Initialize SG-CL components
         self.conceptnet = create_client(local_only=True)  # Local knowledge base (no slow API calls)
-        self.sid = create_sid(self.conceptnet)
+        self.sid = create_sid(
+            self.conceptnet, 
+            conflict_threshold=self.config.conflict_threshold
+        )
         self.generator = create_generator(self.conceptnet)
-        self.batch_constructor = create_batch_constructor(self.sid, self.generator)
+        self.batch_constructor = create_batch_constructor(
+            self.sid, 
+            self.generator,
+            guard_rail_weight=self.config.guard_rail_weight,
+            conflict_claim_weight=self.config.conflict_claim_weight
+        )
         
         # Will be initialized in setup()
         self.model = None
         self.tokenizer = None
         self.peft_model = None
+        self.teacher_model = None
     
     def setup(self):
         """
@@ -299,12 +429,57 @@ class SGCLTrainer:
         # Apply LoRA
         self.peft_model = get_peft_model(self.model, lora_config)
         
+        # Optional: selective layer freezing (freeze lower layers, keep upper plastic)
+        if self.config.freeze_lower_layers:
+            self._apply_selective_freezing()
+        
+        # Optional: load frozen teacher for knowledge distillation
+        if self.config.use_knowledge_distillation:
+            logger.info("Loading frozen teacher model for knowledge distillation...")
+            self.teacher_model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_path,
+                **model_kwargs
+            )
+            self.teacher_model.eval()
+            for param in self.teacher_model.parameters():
+                param.requires_grad = False
+            logger.info("Teacher model loaded and frozen")
+        
         # Print trainable parameters
         trainable_params = sum(p.numel() for p in self.peft_model.parameters() if p.requires_grad)
         all_params = sum(p.numel() for p in self.peft_model.parameters())
         logger.info(f"Trainable parameters: {trainable_params:,} / {all_params:,} ({100 * trainable_params / all_params:.2f}%)")
         
         return self
+    
+    def _apply_selective_freezing(self):
+        """
+        Freeze LoRA adapters in lower transformer layers while leaving upper
+        layers trainable. This structurally separates retained (lower) and
+        new (upper) knowledge.
+        """
+        frozen = 0
+        trainable = 0
+        threshold = self.config.freeze_layer_threshold
+        
+        for name, param in self.peft_model.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            # Extract layer index from names like "base_model.model.model.layers.23.self_attn.q_proj.lora_A.weight"
+            match = re.search(r'layers\.(\d+)\.', name)
+            if match:
+                layer_idx = int(match.group(1))
+                if layer_idx <= threshold:
+                    param.requires_grad = False
+                    frozen += param.numel()
+                else:
+                    trainable += param.numel()
+            else:
+                # Non-layer parameters (embeddings, head) remain trainable
+                trainable += param.numel()
+        
+        logger.info(f"Selective freezing applied: {frozen:,} frozen, {trainable:,} trainable LoRA params")
     
     def prepare_data(
         self, 
@@ -361,7 +536,8 @@ class SGCLTrainer:
         self,
         train_claims: List[str],
         eval_claims: Optional[List[str]] = None,
-        task_name: str = "task_1"
+        task_name: str = "task_1",
+        learning_rate: Optional[float] = None
     ) -> Dict:
         """
         Train on a set of claims.
@@ -393,13 +569,16 @@ class SGCLTrainer:
         use_bf16 = self.config.use_bf16 and self.device == "cuda" and torch.cuda.is_bf16_supported()
         use_fp16 = (not use_bf16) and self.device == "cuda"
         
+        # Task-specific learning rate
+        task_lr = learning_rate if learning_rate is not None else self.config.learning_rate
+        
         # Training arguments — optimized for RTX 4090
         training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=self.config.num_epochs,
             per_device_train_batch_size=self.config.batch_size,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            learning_rate=self.config.learning_rate,
+            learning_rate=task_lr,
             weight_decay=self.config.weight_decay,
             warmup_ratio=self.config.warmup_ratio,
             logging_steps=self.config.logging_steps,
@@ -417,19 +596,21 @@ class SGCLTrainer:
             remove_unused_columns=False,
         )
         
-        # Data collator
-        data_collator = DataCollatorForLanguageModeling(
+        # Data collator (preserves per-sample weights)
+        data_collator = SGCLDataCollator(
             tokenizer=self.tokenizer,
             mlm=False  # Causal LM, not masked LM
         )
         
-        # Create trainer
-        trainer = Trainer(
+        # Create trainer with weighted loss and optional distillation
+        trainer = SGCLHuggingFaceTrainer(
             model=self.peft_model,
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             data_collator=data_collator,
+            teacher_model=self.teacher_model,
+            kd_weight=self.config.kd_weight if self.config.use_knowledge_distillation else 0.0,
         )
         
         # Train
@@ -447,6 +628,7 @@ class SGCLTrainer:
             "train_stats": train_stats,
             "train_loss": train_result.training_loss,
             "train_runtime": train_result.metrics.get("train_runtime", 0),
+            "learning_rate": task_lr,
             "config": self.config.to_dict(),
             "timestamp": datetime.now().isoformat()
         }
@@ -486,10 +668,19 @@ class SGCLTrainer:
             logger.info(f"Task {i+1}/{len(task_sequence)}: {task_name}")
             logger.info(f"{'='*60}")
             
+            # Task-adaptive learning rate
+            task_lr = self.config.learning_rate
+            if i > 0:
+                # Slightly boost LR for new tasks, then decay for stability
+                task_lr = self.config.learning_rate * self.config.new_task_lr_boost * (self.config.task_lr_decay ** i)
+            
+            logger.info(f"Task learning rate: {task_lr:.2e}")
+            
             task_result = self.train(
                 train_claims=claims,
                 eval_claims=eval_claims,
-                task_name=task_name
+                task_name=task_name,
+                learning_rate=task_lr
             )
             
             results.append(task_result)
@@ -548,11 +739,19 @@ class SGCLPipelineDemo:
     Useful for testing the data flow and gating logic.
     """
     
-    def __init__(self):
-        self.conceptnet = create_client()
-        self.sid = create_sid(self.conceptnet)
+    def __init__(
+        self,
+        guard_rail_weight: float = 0.4,
+        conflict_threshold: float = 0.5
+    ):
+        self.conceptnet = create_client(local_only=True)
+        self.sid = create_sid(self.conceptnet, conflict_threshold=conflict_threshold)
         self.generator = create_generator(self.conceptnet)
-        self.batch_constructor = create_batch_constructor(self.sid, self.generator)
+        self.batch_constructor = create_batch_constructor(
+            self.sid, 
+            self.generator,
+            guard_rail_weight=guard_rail_weight
+        )
     
     def demonstrate(self, claims: List[str]) -> Dict:
         """
@@ -673,10 +872,12 @@ if __name__ == "__main__":
     
     config = create_config(
         model_path="./models/llama-2-7b-hf",
-        lora_r=16,
-        lora_alpha=32,
+        lora_r=32,
+        lora_alpha=64,
         batch_size=4,
-        num_epochs=3
+        num_epochs=5,
+        guard_rail_weight=0.4,
+        conflict_threshold=0.5
     )
     
     print("Configuration:")

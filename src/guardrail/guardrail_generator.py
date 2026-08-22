@@ -432,7 +432,9 @@ class GatedBatchConstructor:
     def __init__(
         self,
         sid: Optional[SemanticInconsistencyDetector] = None,
-        generator: Optional[GuardRailGenerator] = None
+        generator: Optional[GuardRailGenerator] = None,
+        guard_rail_weight: float = 0.4,
+        conflict_claim_weight: float = 1.0
     ):
         """
         Initialize batch constructor.
@@ -440,9 +442,14 @@ class GatedBatchConstructor:
         Args:
             sid: Semantic Inconsistency Detector
             generator: Guard-Rail Generator
+            guard_rail_weight: Global multiplier applied to all generated guard-rails.
+                              Values < 1.0 reduce the conservatism of gating.
+            conflict_claim_weight: Weight for the original conflicting claim itself.
         """
         self.sid = sid or create_sid()
         self.generator = generator or GuardRailGenerator(self.sid.conceptnet)
+        self.guard_rail_weight = guard_rail_weight
+        self.conflict_claim_weight = conflict_claim_weight
     
     def construct_batch(
         self, 
@@ -490,9 +497,14 @@ class GatedBatchConstructor:
                 
                 if include_weights:
                     weighted = batch.get_weighted_texts()
-                    for text, weight in weighted:
+                    for i, (text, weight) in enumerate(weighted):
                         gated_texts.append(text)
-                        gated_weights.append(weight)
+                        if i == 0:
+                            # Original conflicting claim
+                            gated_weights.append(self.conflict_claim_weight)
+                        else:
+                            # Generated guard-rail, scaled by global multiplier
+                            gated_weights.append(weight * self.guard_rail_weight)
                 else:
                     gated_texts.extend(batch.get_training_texts())
                 
@@ -533,10 +545,17 @@ def create_generator(
 
 def create_batch_constructor(
     sid: Optional[SemanticInconsistencyDetector] = None,
-    generator: Optional[GuardRailGenerator] = None
+    generator: Optional[GuardRailGenerator] = None,
+    guard_rail_weight: float = 0.4,
+    conflict_claim_weight: float = 1.0
 ) -> GatedBatchConstructor:
     """Create a Gated Batch Constructor with default settings."""
-    return GatedBatchConstructor(sid, generator)
+    return GatedBatchConstructor(
+        sid, 
+        generator, 
+        guard_rail_weight=guard_rail_weight,
+        conflict_claim_weight=conflict_claim_weight
+    )
 
 
 # =============================================================================

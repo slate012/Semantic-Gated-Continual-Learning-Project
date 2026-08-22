@@ -63,6 +63,14 @@ class ConflictResult:
     conflict_type: str  # "none", "direct", "inherited", "exception"
     conflicting_edges: List[ConceptNetEdge]
     explanation: str
+    strength: float = 0.0  # Confidence-normalized conflict strength [0, 1]
+    
+    def __post_init__(self):
+        # Backfill strength for direct conflicts if not provided
+        if self.has_conflict and self.strength == 0.0 and self.conflicting_edges:
+            self.strength = max(
+                min(edge.weight / 4.0, 1.0) for edge in self.conflicting_edges
+            )
     
     
 class ConceptNetClient:
@@ -401,11 +409,13 @@ class ConceptNetClient:
         if opposite_relation:
             exists, edge = self.check_relation_exists(subject, opposite_relation, obj)
             if exists:
+                strength = min(edge.weight / 4.0, 1.0)
                 return ConflictResult(
                     has_conflict=True,
                     conflict_type="direct",
                     conflicting_edges=[edge],
-                    explanation=f"Direct contradiction: {subject} has {opposite_relation}({obj}) in ConceptNet"
+                    explanation=f"Direct contradiction: {subject} has {opposite_relation}({obj}) in ConceptNet",
+                    strength=strength
                 )
         
         # 2. Check existing same relation with different polarity
@@ -433,11 +443,13 @@ class ConceptNetClient:
                     conflicting_edges.append(edge)
             
             if conflicting_edges:
+                strength = max(min(edge.weight / 4.0, 1.0) for edge in conflicting_edges)
                 return ConflictResult(
                     has_conflict=True,
                     conflict_type="inherited",
                     conflicting_edges=conflicting_edges,
-                    explanation=f"Inherited conflict from parent concepts"
+                    explanation=f"Inherited conflict from parent concepts",
+                    strength=strength
                 )
             
             # Check for exception pattern (parent has capability, child doesn't)
@@ -448,11 +460,13 @@ class ConceptNetClient:
                     _, not_capable = self.get_capabilities(subject)
                     for nc in not_capable:
                         if nc.end_label.lower() == obj.lower():
+                            strength = max(min(nc.weight / 4.0, 1.0), min(edge.weight / 4.0, 1.0))
                             return ConflictResult(
                                 has_conflict=True,
                                 conflict_type="exception",
                                 conflicting_edges=[nc, edge],
-                                explanation=f"{subject} is an exception to {parent}'s ability to {obj}"
+                                explanation=f"{subject} is an exception to {parent}'s ability to {obj}",
+                                strength=strength
                             )
         
         # No conflict found
@@ -460,7 +474,8 @@ class ConceptNetClient:
             has_conflict=False,
             conflict_type="none",
             conflicting_edges=[],
-            explanation="No conflict detected with ConceptNet knowledge"
+            explanation="No conflict detected with ConceptNet knowledge",
+            strength=0.0
         )
     
     def get_guardrail_knowledge(

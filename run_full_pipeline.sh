@@ -54,7 +54,7 @@ MODEL_PATH="./models/llama-2-7b-hf"
 OUTPUT_DIR="./outputs"
 DATA_DIR="./data"
 NUM_TASKS=5
-EPOCHS=3
+EPOCHS=5
 BATCH_SIZE=8                # 4-bit model is small, batch=8 fits easily
 LEARNING_RATE=2e-4
 MAX_LENGTH=512              # Full sequence length

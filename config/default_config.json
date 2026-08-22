@@ -1,6 +1,6 @@
 {
     "project": "SG-CL (Symbolic-Gated Continual Learning)",
-    "version": "0.1.0",
+    "version": "0.2.0",
     
     "model": {
         "base_model": "meta-llama/Llama-2-7b-hf",
@@ -9,8 +9,8 @@
     },
     
     "lora": {
-        "r": 16,
-        "alpha": 32,
+        "r": 32,
+        "alpha": 64,
         "dropout": 0.05,
         "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         "bias": "none"
@@ -18,21 +18,32 @@
     
     "training": {
         "learning_rate": 2e-4,
-        "batch_size": 4,
-        "gradient_accumulation_steps": 4,
-        "num_epochs": 3,
+        "batch_size": 8,
+        "gradient_accumulation_steps": 2,
+        "num_epochs": 5,
         "max_seq_length": 512,
         "warmup_ratio": 0.03,
         "weight_decay": 0.01,
-        "fp16": true
+        "bf16": true,
+        "task_lr_decay": 0.9,
+        "new_task_lr_boost": 1.5
     },
     
     "sgcl": {
         "enable_gating": true,
-        "guard_rail_weight": 1.0,
+        "guard_rail_weight": 0.3,
+        "conflict_claim_weight": 1.0,
+        "conflict_threshold": 0.7,
         "max_guard_rails_per_conflict": 5,
         "conceptnet_api": "http://api.conceptnet.io",
         "use_local_fallback": true
+    },
+
+    "advanced": {
+        "use_knowledge_distillation": false,
+        "kd_weight": 0.3,
+        "freeze_lower_layers": false,
+        "freeze_layer_threshold": 20
     },
     
     "paths": {

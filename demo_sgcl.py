@@ -545,11 +545,13 @@ def demo_training_pipeline():
     
     config = create_config(
         model_path="./models/llama-2-7b-hf",
-        lora_r=16,
-        lora_alpha=32,
+        lora_r=32,
+        lora_alpha=64,
         batch_size=4,
-        num_epochs=3,
-        enable_gating=True
+        num_epochs=5,
+        enable_gating=True,
+        guard_rail_weight=0.4,
+        conflict_threshold=0.5
     )
     
     print(f"  {Colors.BOLD}Model Configuration:{Colors.END}")
@@ -569,6 +571,7 @@ def demo_training_pipeline():
     print(f"\n  {Colors.BOLD}SG-CL Configuration:{Colors.END}")
     print_data("Gating enabled", str(config.enable_gating), indent=4)
     print_data("Guard-rail weight", str(config.guard_rail_weight), indent=4)
+    print_data("Conflict threshold", str(config.conflict_threshold), indent=4)
     print_data("Max guard-rails", str(config.max_guard_rails), indent=4)
     
     print_section("4.2 Pipeline Demo (No Model Loading)")
