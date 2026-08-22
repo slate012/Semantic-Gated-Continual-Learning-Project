@@ -213,13 +213,24 @@ rm -rf "$OUTPUT_DIR/smoke_test"
 print_header "STEP 5: Full Training (5 Tasks × $EPOCHS Epochs)"
 
 TOTAL_START=$(date +%s)
+TOTAL_TASK_DURATION=0
 
 for TASK_NUM in $(seq 1 $NUM_TASKS); do
     echo ""
     print_step "═══ Task $TASK_NUM / $NUM_TASKS ═══"
-    
+
+    if [ $TASK_NUM -gt 1 ] && [ $((TASK_NUM - 1)) -gt 0 ]; then
+        AVG_TASK_DURATION=$((TOTAL_TASK_DURATION / (TASK_NUM - 1)))
+        REMAINING_TASKS=$((NUM_TASKS - TASK_NUM + 1))
+        ETA=$((AVG_TASK_DURATION * REMAINING_TASKS))
+        ETA_MINS=$((ETA / 60))
+        echo -e "  ${CYAN}⏱ Estimated time remaining: ~${ETA_MINS}m (${REMAINING_TASKS} task(s) left)${NC}"
+    else
+        echo -e "  ${CYAN}⏱ Estimating total time after Task 1...${NC}"
+    fi
+
     TASK_START=$(date +%s)
-    
+
     $PYTHON run_training.py \
         --data "$DATA_DIR/train_task_${TASK_NUM}.txt" \
         --model "$MODEL_PATH" \
@@ -232,11 +243,13 @@ for TASK_NUM in $(seq 1 $NUM_TASKS); do
         --lr $LEARNING_RATE \
         --lora-r $LORA_R \
         --lora-alpha $LORA_ALPHA
-    
+
     TASK_END=$(date +%s)
     TASK_DURATION=$((TASK_END - TASK_START))
+    TOTAL_TASK_DURATION=$((TOTAL_TASK_DURATION + TASK_DURATION))
     TASK_MINS=$((TASK_DURATION / 60))
-    echo -e "  ${GREEN}✓ Task $TASK_NUM completed in ${TASK_MINS}m ${TASK_DURATION}s${NC}"
+    TASK_SECS=$((TASK_DURATION % 60))
+    echo -e "  ${GREEN}✓ Task $TASK_NUM completed in ${TASK_MINS}m ${TASK_SECS}s${NC}"
 done
 
 TOTAL_END=$(date +%s)
