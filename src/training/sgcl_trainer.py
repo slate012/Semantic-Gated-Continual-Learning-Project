@@ -93,7 +93,7 @@ class SGCLConfig:
     batch_size: int = 8                 # 4-bit model is small, batch=8 fits easily
     gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 = 16
     num_epochs: int = 5                 # More epochs to absorb new knowledge
-    max_seq_length: int = 512
+    max_seq_length: int = 256
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
     load_in_4bit: bool = True              # 4-bit NF4 quant (model ~4.5GB, leaves room)

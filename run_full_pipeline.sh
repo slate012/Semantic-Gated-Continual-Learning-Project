@@ -57,7 +57,7 @@ NUM_TASKS=5
 EPOCHS=5
 BATCH_SIZE=8                # 4-bit model is small, batch=8 fits easily
 LEARNING_RATE=2e-4
-MAX_LENGTH=512              # Full sequence length
+MAX_LENGTH=256              # Reduced sequence length for faster training
 LORA_R=16
 LORA_ALPHA=32
 GRAD_ACCUM=2                # Effective batch = BATCH_SIZE * GRAD_ACCUM = 16

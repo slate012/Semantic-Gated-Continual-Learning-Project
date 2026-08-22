@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size (8 for RTX 4090 4-bit)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
-    parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
+    parser.add_argument("--max-length", type=int, default=256, help="Max sequence length")
     parser.add_argument("--task-lr-decay", type=float, default=0.9, help="LR decay factor per subsequent task")
     parser.add_argument("--new-task-lr-boost", type=float, default=1.5, help="LR multiplier for tasks after the first")
 

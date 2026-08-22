@@ -21,7 +21,7 @@
         "batch_size": 8,
         "gradient_accumulation_steps": 2,
         "num_epochs": 5,
-        "max_seq_length": 512,
+        "max_seq_length": 256,
         "warmup_ratio": 0.03,
         "weight_decay": 0.01,
         "bf16": true,
